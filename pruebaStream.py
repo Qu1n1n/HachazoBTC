@@ -14,10 +14,14 @@ depth_lock = threading.Lock()
 
 # === Funciones ===
 def cargar_snapshot():
+    """Cargar snapshot inicial del order book con manejo de errores."""
     url = "https://api.binance.com/api/v3/depth"
     params = {"symbol": symbol, "limit": 5000}
     try:
-        data = requests.get(url, params=params, timeout=5).json()
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
+        if "bids" not in data or "asks" not in data:
+            raise ValueError(f"Respuesta inesperada de Binance: {data}")
         bids = pd.DataFrame(data["bids"], columns=["price", "quantity"], dtype=float)
         asks = pd.DataFrame(data["asks"], columns=["price", "quantity"], dtype=float)
         bids["side"] = "bid"
@@ -25,6 +29,7 @@ def cargar_snapshot():
         return pd.concat([bids, asks])
     except Exception as e:
         st.warning(f"No se pudo cargar snapshot: {e}")
+        # Datos de ejemplo temporales
         precios = [28000, 28100, 28200, 28300]
         return pd.DataFrame({
             "price": precios*2,
@@ -33,6 +38,7 @@ def cargar_snapshot():
         })
 
 def aplicar_update(data):
+    """Aplicar actualización del WebSocket al orderbook."""
     updates = []
     for price_str, qty_str in data.get("b", []):
         updates.append({"price": float(price_str), "quantity": float(qty_str), "side": "bid"})
@@ -47,6 +53,7 @@ def on_message(ws, message):
     aplicar_update(json.loads(message))
 
 def iniciar_ws():
+    """Conectar al WebSocket de Binance."""
     url = f"wss://stream.binance.com:9443/ws/{symbol.lower()}@depth@100ms"
     ws = websocket.WebSocketApp(url, on_message=on_message)
     ws.run_forever()
@@ -57,7 +64,7 @@ if "ws_thread" not in st.session_state:
     ws_thread = threading.Thread(target=iniciar_ws, daemon=True)
     ws_thread.start()
     st.session_state["ws_thread"] = ws_thread
-    time.sleep(1)
+    time.sleep(1)  # margen antes de la primera actualización
 
 # === UI ===
 st.title("📊 Order Book BTC/USDT en tiempo real (Heatmap)")
@@ -65,7 +72,6 @@ st.title("📊 Order Book BTC/USDT en tiempo real (Heatmap)")
 # Placeholder para actualizar solo la gráfica y datos
 placeholder = st.empty()
 
-# Función para actualizar la gráfica dentro del placeholder
 def actualizar_grafica():
     with depth_lock:
         ob = st.session_state["orderbook"].copy()
@@ -89,6 +95,10 @@ def actualizar_grafica():
         mid_price = (best_bid + best_ask) / 2
         step = 10
         ob["price"] = (ob["price"] // step * step).astype(int)
+
+        # Ajustar rango dinámico según niveles disponibles ±4000
+        rango_usd = 4000
+        ob = ob[(ob["price"] >= mid_price - rango_usd) & (ob["price"] <= mid_price + rango_usd)]
 
         y_vals = sorted(ob["price"].unique(), reverse=True)
         pivot = ob.pivot_table(index="price", columns="side", values="quantity", aggfunc="sum", fill_value=0)
@@ -119,16 +129,16 @@ def actualizar_grafica():
             )
         )
 
-        # Línea roja del mid-price
+        # Línea roja del mid-price con texto rojo
         fig.add_hline(
             y=mid_price,
             line=dict(color="red", dash="dash", width=2),
             annotation_text=f"Mid-Price: {mid_price:.2f}",
-            annotation_font=dict(color="red", size=12),  # <--- Texto en rojo
+            annotation_font=dict(color="red", size=12),
             annotation_position="top left"
         )
 
-        # Eje Y dinámico según niveles disponibles
+        # Eje Y dinámico
         y_min = pivot.index.min()
         y_max = pivot.index.max()
 
